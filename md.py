@@ -9,7 +9,7 @@ import initialize as init
 import observables as obs
 
 
-def md(dim, natom, L, position, velocity, mass, sigma, steps, tau, fileName):
+def md(dim, natom, L, position, velocity, mass, sigma, T, steps, tau, fileName):
     print 'Molecular Dynamics Simulation'
     print 'Dimensions:', dim
     print 'Size of Box:', L
@@ -19,12 +19,17 @@ def md(dim, natom, L, position, velocity, mass, sigma, steps, tau, fileName):
     print 'Timestep size', tau
 
     print_step = 25
+    rescale_step = 500
     dof = dim*natom - dim
     pos0 = np.copy(position)
     pos = np.copy(position)
     vel = np.copy(velocity)
     acc = np.zeros((natom,dim))
     pbc = np.zeros((natom,dim))
+
+    binNum = int(2*L[2])
+    hist = np.zeros(binNum)
+    rescales = 0
 
     force, potE, kinE = compute_LJ(dim, natom, L, pos, vel, mass, sigma)
     totE = potE + kinE
@@ -37,17 +42,43 @@ def md(dim, natom, L, position, velocity, mass, sigma, steps, tau, fileName):
     for step in range(0,steps+1):
         pos, vel, acc, pbc = evolve(dim, natom, L, pos, vel, acc, pbc, mass, sigma, tau)
 
+
         potE, kinE = compute_LJ(dim, natom, L, pos, vel, mass, sigma)[1:]
         totE = potE + kinE
-        T = 2*kinE/(natom*dof)
+        temp = 2*natom*kinE/(dof)
+
+        Tmax = 1.5
+        Tmin = 1.0
+        #if step > 1000:
+        #    vel = velRescaleGradient(dim, natom, L, pos, vel, Tmax, Tmin, rescale_step)
+        #else:
+        vel = velRescaleUniform(dim, natom, vel, T, rescale_step)
+
+        #if (step+rescale_step) % rescale_step == 0:
+        #    if step > 1000:
+        #        Tmax = 1.5
+        #        Tmin = 1.0
+        #        hist = (hist + np.histogram(pos, bins=binNum, range=(0,L[2]))[0])
+        #        vel = velRescaleGradient(dim, natom, L, pos, vel, Tmax, Tmin)
+        #        rescales+=1
+        #    elif step > 0.0:
+        #        vel = velRescaleUniform(dim, natom, vel, T)
+
 
         if (step+print_step) % print_step == 0:
-            print "%8d %14g %14g %14g %14g" % (step, potE/natom, kinE/natom, totE/natom, T)
+            print "%8d %14g %14g %14g %14g" % (step, potE, kinE, totE, temp)
             dumpPos(pos, step, fileName)
             dumpVel(vel, step)
             dumpAcc(acc, step)
+            dumpEnergy(potE, kinE, totE, step)
             solMSD(pos, step, pos0, pbc, L[0])
             bigMSD(pos, step, pos0, pbc, L[0])
+        if step < 25:
+            solMSD(pos, step, pos0, pbc, L[0])
+            bigMSD(pos, step, pos0, pbc, L[0])
+
+    createRestart(dim, natom, L, pos, vel, step)
+    np.savetxt("densityHistDat_16bins.txt", hist/rescales)
     return
 
 def compute_LJslow(dim, natom, L, pos, vel, mass, sigma):
@@ -86,7 +117,7 @@ def compute_LJslow(dim, natom, L, pos, vel, mass, sigma):
 
     kinE = 0.5*np.sum(mass[:,None]*vel[::]*vel[::])
 
-    return force, potE, kinE
+    return force, potE/natom, kinE/natom
 
 def compute_LJ(dim, natom, L, pos, vel, mass, sig2):
     #Calculates forces on particles according to 12-6 LJ potential
@@ -138,7 +169,7 @@ def compute_LJ(dim, natom, L, pos, vel, mass, sig2):
     #Calculate kinE
     kinE = 0.5*np.sum(mass[:,None]*vel[::]*vel[::])
 
-    return force, potE, kinE
+    return force, potE/natom, kinE/natom
 
 def evolve(dim, natom, L, pos0, vel0, acc0, pbc0, mass, sigma, tau):
     vel = np.copy(vel0)
@@ -157,8 +188,8 @@ def evolve(dim, natom, L, pos0, vel0, acc0, pbc0, mass, sigma, tau):
 
     #Compute accelerations from updated positions
     force = compute_LJ(dim, natom, L, pos, vel, mass, sigma)[0]
-    acc = force / mass[:,None] #\
-                #- Gauss_Thermostat(natom, force, vel, mass)
+    acc = force / mass[:,None]
+                            #- Gauss_Thermostat(natom, force, vel, mass)
 
     #Velocity Verlet--Last Step: Get full step velocities
     vel = vel + 0.5*tau*acc
@@ -185,6 +216,123 @@ def mxwl(dim, natom, vel, T):
     vel = vel - vcm
     return vel
 
+def velRescaleUniform(dim, natom, vel0, T, rescaleStep):
+    total_v_components = dim*natom
+    dof = dim*natom - dim
+    vel = np.copy(vel0)
+
+    #Scale velocities to equipartition theorem
+    ek = np.sum(vel*vel)
+    vs = np.sqrt(ek/(dof*T))
+    vel = vel/(vs**(1/rescaleStep))
+    return vel
+
+def velRescaleGradient(dim, natom, L, pos0, vel0, Tmax, Tmin, rescaleStep):
+    total_v_components = dim*natom
+    dof = dim*natom - dim
+    pos = np.copy(pos0)
+    vel = np.copy(vel0)
+    l = L[2]
+
+    #offset = 2.0
+    #vout = (pos[:,2] < offset) & (pos[:,2] > (l-offset) )
+    #vin = (pos[:,2] > offset) & (pos[:,2] < (l-offset))
+
+
+    vbot = (pos[:,2] < l/2)
+    vtop = (pos[:,2] > l/2)
+
+
+    #Bottom Cold Region
+    v0 = vel[vbot]              #velocity of each particle in region
+    N0 = v0.shape[0]            #Number of particles in this region
+    z0 = pos[vbot][:,2]         #z-positions of each particle in region
+    dof0 = dim*N0 - dim         #Total number of dof in this region
+    ek0 = np.sum(v0*v0)         #Kinetic Energy of this region
+    vs0 = np.sqrt(ek0/(dof0*Tmin))
+    vel[vbot] = vel[vbot]/(vs0**(1/rescaleStep))
+    #print pos[vtop]
+    #print "Low Temp:", ek0/dof0
+    #print "low temp after:", np.sum(vel[vbot]*vel[vbot])/dof0
+
+    #Top Hot region
+    v1 = vel[vtop]
+    N1 = v1.shape[0]
+    dof1 = dim*N1 - dim
+    ek1 = np.sum(v1*v1)
+    vs1 = np.sqrt(ek1/(dof1*Tmax))
+    vel[vtop] = vel[vtop]/(vs1**(1/rescaleStep))
+    #print "High Temp:", ek1/dof1
+    #print "high temp after:", np.sum(vel[vtop]*vel[vtop])/dof1
+    print 'Top Particles:', N1
+    print 'Bot Particles:', N0
+
+    return vel
+
+def velRescaleGradient4(dim, natom, L, pos0, vel0, Tmax, Tmin, rescaleStep):
+    total_v_components = dim*natom
+    dof = dim*natom - dim
+    pos = np.copy(pos0)
+    vel = np.copy(vel0)
+    l = L[2]
+
+    #offset = 2.0
+    #vout = (pos[:,2] < offset) & (pos[:,2] > (l-offset) )
+    #vin = (pos[:,2] > offset) & (pos[:,2] < (l-offset))
+
+    divs = 4
+    vbot = (pos[:,2] < l/4)
+    vtop = (pos[:,2] > 3*l/4)
+    vmid1 = (pos[:,2] > l/4) & (pos[:,2] < l/2)
+    vmid2 = (pos[:,2] > l/2) & (pos[:,2] < 3*l/4)
+
+    Tdiff = (Tmax - Tmin)/3
+    Tmid1 = Tmax - Tdiff
+    Tmid2 = Tmid1 - Tdiff
+
+    #Bottom Cold Region
+    v0 = vel[vbot]              #velocity of each particle in region
+    N0 = v0.shape[0]            #Number of particles in this region
+    z0 = pos[vbot][:,2]         #z-positions of each particle in region
+    dof0 = dim*N0 - dim         #Total number of dof in this region
+    ek0 = np.sum(v0*v0)         #Kinetic Energy of this region
+    vs0 = np.sqrt(ek0/(dof0*Tmin))
+    vel[vbot] = vel[vbot]/(vs0**(1/rescaleStep))
+    #print pos[vtop]
+    #print "Low Temp:", ek0/dof0
+    #print "low temp after:", np.sum(vel[vbot]*vel[vbot])/dof0
+
+    #Top Hot region
+    v1 = vel[vtop]
+    N1 = v1.shape[0]
+    dof1 = dim*N1 - dim
+    ek1 = np.sum(v1*v1)
+    vs1 = np.sqrt(ek1/(dof1*Tmax))
+    vel[vtop] = vel[vtop]/(vs1**(1/rescaleStep))
+    #print "High Temp:", ek1/dof1
+    #print "high temp after:", np.sum(vel[vtop]*vel[vtop])/dof1
+    #print 'Top Particles:', N1
+    #print 'Bot Particles:', N0
+
+    #Upper Middle Region
+    v3 = vel[vmid1]
+    N3 = v1.shape[0]
+    dof3 = dim*N3 - dim
+    ek3 = np.sum(v3*v3)
+    vs3 = np.sqrt(ek3/(dof3*Tmid1))
+    vel[vmid1] = vel[vmid1]/(vs3**(1/rescaleStep))
+
+    #Lower Middle Region
+    v2 = vel[vmid2]
+    N2 = v1.shape[0]
+    dof2 = dim*N2 - dim
+    ek2 = np.sum(v2*v2)
+    vs2 = np.sqrt(ek2/(dof2*Tmid2))
+    vel[vmid2] = vel[vmid2]/(vs2**(1/rescaleStep))
+
+    return vel
+
+
 def Gauss_Thermostat(natom, F, vel, mass):
     mom = vel*mass[:,None]
     #Calcualte weight parameter alpha
@@ -198,6 +346,10 @@ def Gauss_Thermostat(natom, F, vel, mass):
 
     return alpha*mom
 
+def PosBin(pos0, hist):
+    pos = np.copy(pos)
+    #hist +=
+    return
 
 def swap(pos, i, j):
     #Swap positions and velocitiees of particle i with particle j
@@ -269,6 +421,17 @@ def dumpAcc(acc, step):
         k.write(line)
     return
 
+def dumpEnergy(potE, kinE, totE, step):
+    fileName = 'EnergiesTest.txt'
+    if step == 0:
+        k = open(fileName,'w')
+    else:
+        k = open(fileName,'a')
+
+    line = "{0:g} {1:g} {2:g} {3:g} \n".format(step, potE, kinE, totE)
+    k.write(line)
+    return
+
 
 def solMSD(pos, step, pos0, pbc, l):
     #Calculates MSD at timestep 'step' and writes to a file
@@ -284,7 +447,7 @@ def solMSD(pos, step, pos0, pbc, l):
 
 def bigMSD(pos, step, pos0, pbc, l):
     #Calculates MSD at timestep 'step' for the colloid
-    fileName = 'msdColloid.txt'
+    fileName = 'msdColloid_temp5.txt'
     if step == 0:
         g2 = open(fileName,'w')
     else:
@@ -294,27 +457,37 @@ def bigMSD(pos, step, pos0, pbc, l):
     g2.write(line)
     return
 
+def createRestart(dim, natom, L, pos, vel, step):
+    #Creates restart files for positions and velocities from the state of our
+    #system at 'step' with positions and velocities 'pos' and 'vel'
+    np.savetxt("restart_pos.txt", pos)
+    np.savetxt("restart_vel.txt", vel)
+    return
+
+
 
 if __name__ == '__main__':
     dim = 3
-    natom = 100
-    steps = 1000
+    natom = 500
+    steps = 5000
     dt = 0.01
-    l = 6.786           #Phi=0.4
+    l = 8.0           #Phi=0.4
     L = [l,l,l]
 
     mass = np.full((natom),1.0, dtype=float)
-    mass[0] = 25
+    mass[0] = 20
 
     sigma = np.full((natom), 1.0, dtype=float)
     sig2 = 2.0
     sigma[0] = sig2
 
+    T = 1.0
+
     fileName = 'test.xyz'
-    pos, vel = initialize(dim, natom, L, 0.1, "cube")
+    pos, vel = initialize(dim, natom, L, T, "cube")
     #pos, vel = initialize(dim, natom, L, 1.0, 'basic')
-    vel[0] = 0.0 #for bigger particle
+    #vel[0] = 0.0 #for bigger particle
     a = 0; b = np.int(natom/2)
     swap(pos,a,b)
     print "vel sum:", vel.sum()
-    md(dim, natom, L, pos, vel, mass, sig2, steps, dt, fileName)
+    md(dim, natom, L, pos, vel, mass, sig2, T, steps, dt, fileName)

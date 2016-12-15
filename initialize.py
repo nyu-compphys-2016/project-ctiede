@@ -205,6 +205,7 @@ def mxwl(dim, natom, vel, T):
     dof = dim*natom - dim
 
     #Assign Gaussian dist to each velocity component
+    np.random.seed(345)
     for i in range(natom):
         for k in range(dim):
             vel[i][k] = np.random.standard_normal()
@@ -214,10 +215,19 @@ def mxwl(dim, natom, vel, T):
     vs = np.sqrt(ek/(dof*T))
     vel = vel/vs
 
+    newKE = 0.5*np.sum(vel*vel)
+    print "Kinetic E: ", newKE
+    print "Ave KE: ", newKE/natom
+    print "Desired T: ",T
+    print "Achieved T: ", 2*newKE/(dof)
+    plt.hist(vel,bins='auto')
+    plt.show()
+
     #Calculate COM velocity
     vcm = vel.sum(axis=0)/natom #1d array with [vcm_x,vcm_y,vcm_z]
     #Move to COM frame to negate any inadvertent flow
     vel = vel - vcm
+
     return vel
 
 if __name__ == '__main__':
