@@ -19,7 +19,7 @@ def md(dim, natom, L, position, velocity, mass, sigma, T, steps, tau, fileName):
     print 'Timestep size', tau
 
     print_step = 25
-    rescale_step = 500
+    rescale_step = 200
     dof = dim*natom - dim
     pos0 = np.copy(position)
     pos = np.copy(position)
@@ -47,12 +47,13 @@ def md(dim, natom, L, position, velocity, mass, sigma, T, steps, tau, fileName):
         totE = potE + kinE
         temp = 2*natom*kinE/(dof)
 
-        Tmax = 1.5
+        Tmax = 2.0
         Tmin = 1.0
-        #if step > 1000:
-        #    vel = velRescaleGradient(dim, natom, L, pos, vel, Tmax, Tmin, rescale_step)
+        equibTime = 2000 #steps
+        #if step > equibTime:
+        #    vel[1:] = velRescaleGradient(dim, natom, L, pos[1:], vel[1:], Tmax, Tmin, rescale_step)
         #else:
-        vel = velRescaleUniform(dim, natom, vel, T, rescale_step)
+        #vel = velRescaleUniform(dim, natom, vel, 0.5, rescale_step)
 
         #if (step+rescale_step) % rescale_step == 0:
         #    if step > 1000:
@@ -70,7 +71,7 @@ def md(dim, natom, L, position, velocity, mass, sigma, T, steps, tau, fileName):
             dumpPos(pos, step, fileName)
             dumpVel(vel, step)
             dumpAcc(acc, step)
-            dumpEnergy(potE, kinE, totE, step)
+            dumpEnergy(potE, kinE, totE, temp, step)
             solMSD(pos, step, pos0, pbc, L[0])
             bigMSD(pos, step, pos0, pbc, L[0])
         if step < 25:
@@ -227,6 +228,24 @@ def velRescaleUniform(dim, natom, vel0, T, rescaleStep):
     vel = vel/(vs**(1/rescaleStep))
     return vel
 
+def velRescaleSplit(dim, natom, L, pos0, vel0, Tmax, Tmin, rescaleStep):
+    total_v_components = dim*natom
+    dof = dim*natom - dim
+    pos = np.copy(pos0)
+    vel = np.copy(vel0)
+    l = L[2]
+
+    vbot = (pos[:,2] < l/2)
+    vtop = (pos[:,2] > l/2)
+
+    #Top Hot region
+    vel[vtop] = velRescaleUniform(dim, vel[vtop].shape[0], vel[vtop], Tmax, rescaleStep)
+
+    #Bottom Cold Region
+    vel[vbot] = velRescaleUniform(dim, vel[vbot].shape[0], vel[vbot], Tmin, rescaleStep)
+
+    return vel
+
 def velRescaleGradient(dim, natom, L, pos0, vel0, Tmax, Tmin, rescaleStep):
     total_v_components = dim*natom
     dof = dim*natom - dim
@@ -234,101 +253,35 @@ def velRescaleGradient(dim, natom, L, pos0, vel0, Tmax, Tmin, rescaleStep):
     vel = np.copy(vel0)
     l = L[2]
 
-    #offset = 2.0
-    #vout = (pos[:,2] < offset) & (pos[:,2] > (l-offset) )
-    #vin = (pos[:,2] > offset) & (pos[:,2] < (l-offset))
+    v1 = (pos[:,2] < l/8)
+    v2 = (pos[:,2] > l/8) & (pos[:,2] < 2*l/8)
+    v3 = (pos[:,2] > l/4) & (pos[:,2] < 3*l/8)
+    v4 = (pos[:,2] > 3*l/8) & (pos[:,2] < 4*l/8)
+    v5 = (pos[:,2] > l/2) & (pos[:,2] < 5*l/8)
+    v6 = (pos[:,2] > 5*l/8) & (pos[:,2] < 6*l/8)
+    v7 = (pos[:,2] > 3*l/4) & (pos[:,2] < 7*l/8)
+    v8 = (pos[:,2] > 7*l/8) & (pos[:,2] < l)
 
+    region_types = 4.0
+    temp_step = (Tmax - Tmin)/(region_types - 1)
 
-    vbot = (pos[:,2] < l/2)
-    vtop = (pos[:,2] > l/2)
+    #Outer Cold regions
+    vel[v1] = velRescaleUniform(dim, vel[v1].shape[0], vel[v1], Tmin, rescaleStep)
+    vel[v8] = velRescaleUniform(dim, vel[v8].shape[0], vel[v8], Tmin, rescaleStep)
 
+    #Second Coldest Region
+    Tmid1 = Tmin + temp_step
+    vel[v2] = velRescaleUniform(dim, vel[v2].shape[0], vel[v2], Tmid1, rescaleStep)
+    vel[v7] = velRescaleUniform(dim, vel[v7].shape[0], vel[v7], Tmid1, rescaleStep)
 
-    #Bottom Cold Region
-    v0 = vel[vbot]              #velocity of each particle in region
-    N0 = v0.shape[0]            #Number of particles in this region
-    z0 = pos[vbot][:,2]         #z-positions of each particle in region
-    dof0 = dim*N0 - dim         #Total number of dof in this region
-    ek0 = np.sum(v0*v0)         #Kinetic Energy of this region
-    vs0 = np.sqrt(ek0/(dof0*Tmin))
-    vel[vbot] = vel[vbot]/(vs0**(1/rescaleStep))
-    #print pos[vtop]
-    #print "Low Temp:", ek0/dof0
-    #print "low temp after:", np.sum(vel[vbot]*vel[vbot])/dof0
+    #Second Hottest Region
+    Tmid2 = Tmid1 + temp_step
+    vel[v3] = velRescaleUniform(dim, vel[v3].shape[0], vel[v3], Tmid2, rescaleStep)
+    vel[v6] = velRescaleUniform(dim, vel[v6].shape[0], vel[v6], Tmid2, rescaleStep)
 
-    #Top Hot region
-    v1 = vel[vtop]
-    N1 = v1.shape[0]
-    dof1 = dim*N1 - dim
-    ek1 = np.sum(v1*v1)
-    vs1 = np.sqrt(ek1/(dof1*Tmax))
-    vel[vtop] = vel[vtop]/(vs1**(1/rescaleStep))
-    #print "High Temp:", ek1/dof1
-    #print "high temp after:", np.sum(vel[vtop]*vel[vtop])/dof1
-    print 'Top Particles:', N1
-    print 'Bot Particles:', N0
-
-    return vel
-
-def velRescaleGradient4(dim, natom, L, pos0, vel0, Tmax, Tmin, rescaleStep):
-    total_v_components = dim*natom
-    dof = dim*natom - dim
-    pos = np.copy(pos0)
-    vel = np.copy(vel0)
-    l = L[2]
-
-    #offset = 2.0
-    #vout = (pos[:,2] < offset) & (pos[:,2] > (l-offset) )
-    #vin = (pos[:,2] > offset) & (pos[:,2] < (l-offset))
-
-    divs = 4
-    vbot = (pos[:,2] < l/4)
-    vtop = (pos[:,2] > 3*l/4)
-    vmid1 = (pos[:,2] > l/4) & (pos[:,2] < l/2)
-    vmid2 = (pos[:,2] > l/2) & (pos[:,2] < 3*l/4)
-
-    Tdiff = (Tmax - Tmin)/3
-    Tmid1 = Tmax - Tdiff
-    Tmid2 = Tmid1 - Tdiff
-
-    #Bottom Cold Region
-    v0 = vel[vbot]              #velocity of each particle in region
-    N0 = v0.shape[0]            #Number of particles in this region
-    z0 = pos[vbot][:,2]         #z-positions of each particle in region
-    dof0 = dim*N0 - dim         #Total number of dof in this region
-    ek0 = np.sum(v0*v0)         #Kinetic Energy of this region
-    vs0 = np.sqrt(ek0/(dof0*Tmin))
-    vel[vbot] = vel[vbot]/(vs0**(1/rescaleStep))
-    #print pos[vtop]
-    #print "Low Temp:", ek0/dof0
-    #print "low temp after:", np.sum(vel[vbot]*vel[vbot])/dof0
-
-    #Top Hot region
-    v1 = vel[vtop]
-    N1 = v1.shape[0]
-    dof1 = dim*N1 - dim
-    ek1 = np.sum(v1*v1)
-    vs1 = np.sqrt(ek1/(dof1*Tmax))
-    vel[vtop] = vel[vtop]/(vs1**(1/rescaleStep))
-    #print "High Temp:", ek1/dof1
-    #print "high temp after:", np.sum(vel[vtop]*vel[vtop])/dof1
-    #print 'Top Particles:', N1
-    #print 'Bot Particles:', N0
-
-    #Upper Middle Region
-    v3 = vel[vmid1]
-    N3 = v1.shape[0]
-    dof3 = dim*N3 - dim
-    ek3 = np.sum(v3*v3)
-    vs3 = np.sqrt(ek3/(dof3*Tmid1))
-    vel[vmid1] = vel[vmid1]/(vs3**(1/rescaleStep))
-
-    #Lower Middle Region
-    v2 = vel[vmid2]
-    N2 = v1.shape[0]
-    dof2 = dim*N2 - dim
-    ek2 = np.sum(v2*v2)
-    vs2 = np.sqrt(ek2/(dof2*Tmid2))
-    vel[vmid2] = vel[vmid2]/(vs2**(1/rescaleStep))
+    #Inner Hot Regions
+    vel[v4] = velRescaleUniform(dim, vel[v4].shape[0], vel[v4], Tmax, rescaleStep)
+    vel[v5] = velRescaleUniform(dim, vel[v5].shape[0], vel[v5], Tmax, rescaleStep)
 
     return vel
 
@@ -421,14 +374,14 @@ def dumpAcc(acc, step):
         k.write(line)
     return
 
-def dumpEnergy(potE, kinE, totE, step):
+def dumpEnergy(potE, kinE, totE, temp, step):
     fileName = 'EnergiesTest.txt'
     if step == 0:
         k = open(fileName,'w')
     else:
         k = open(fileName,'a')
 
-    line = "{0:g} {1:g} {2:g} {3:g} \n".format(step, potE, kinE, totE)
+    line = "{0:g} {1:g} {2:g} {3:g} {4:g} \n".format(step, potE, kinE, totE, temp)
     k.write(line)
     return
 
@@ -468,20 +421,19 @@ def createRestart(dim, natom, L, pos, vel, step):
 
 if __name__ == '__main__':
     dim = 3
-    natom = 500
+    natom = 200
     steps = 5000
     dt = 0.01
     l = 8.0           #Phi=0.4
     L = [l,l,l]
 
     mass = np.full((natom),1.0, dtype=float)
-    mass[0] = 20
-
+    mass[0] = 1 #20
     sigma = np.full((natom), 1.0, dtype=float)
     sig2 = 2.0
     sigma[0] = sig2
 
-    T = 1.0
+    T = 1.5
 
     fileName = 'test.xyz'
     pos, vel = initialize(dim, natom, L, T, "cube")
